@@ -101,28 +101,38 @@ The pipeline ingests CPCB station-level records containing 11 features:
 ## Chapter 4: Experiments & Results
 
 ### 4.1 Local GUI Screenshot
-Our completed interactive Streamlit application showing the real-time KPIs, Plotly Map, data sandbox, and forecasting:
+Our completed interactive Streamlit application showing the real-time KPIs, Plotly Map, data sandbox, and forecasting (scaled for document balance):
 
-![Streamlit App Interface Showcase](outputs/charts/dashboard_mockup.png)
+<div align="center">
+  <img src="outputs/charts/dashboard_mockup.png" width="480" alt="Streamlit App Interface Showcase" />
+</div>
 
 ### 4.2 Dataset Statistics & Distributions
 The cleaned dataset contains **3,143 validated rows**. The figure below shows the volume of readings collected for each pollutant type:
 
-![Readings per Pollutant](outputs/charts/pollutant_counts.png)
+<div align="center">
+  <img src="outputs/charts/pollutant_counts.png" width="550" alt="Readings per Pollutant" />
+</div>
 
 Particulate matter ($\text{PM}_{2.5}$ and $\text{PM}_{10}$) along with $\text{NO}_2$ represent the majority of CPCB data. The box plot below shows the distribution of averages:
 
-![Pollutant Concentration Spread](outputs/charts/pollutant_distribution.png)
+<div align="center">
+  <img src="outputs/charts/pollutant_distribution.png" width="580" alt="Pollutant Concentration Spread" />
+</div>
 
 ### 4.3 Geo-Spatial Mapping
 Mapping the stations by coordinate reveals key hotspots in Northern and Western India:
 
-![Geographical Pollution Hotspots Map](outputs/charts/geo_hotspots.png)
+<div align="center">
+  <img src="outputs/charts/geo_hotspots.png" width="450" alt="Geographical Pollution Hotspots Map" />
+</div>
 
 ### 4.4 City-Level Rankings
 The top 15 most polluted cities in India by mean pollutant concentration:
 
-![Top Cities by Mean Pollutant Concentration](outputs/charts/top_cities.png)
+<div align="center">
+  <img src="outputs/charts/top_cities.png" width="550" alt="Top Cities by Mean Pollutant Concentration" />
+</div>
 
 ---
 
@@ -131,7 +141,9 @@ The top 15 most polluted cities in India by mean pollutant concentration:
 ### 5.1 SPIS Scoring and Risk Bands
 The **Station Pollution Intelligence Score (SPIS)** successfully groups stations into Low, Moderate, High, and Severe bands.
 
-![SPIS Risk Band Classification Counts](outputs/charts/spis_risk_bands.png)
+<div align="center">
+  <img src="outputs/charts/spis_risk_bands.png" width="450" alt="SPIS Risk Band Classification Counts" />
+</div>
 
 * **Severe Stations:** **2 stations (0.4% of total)** fell into the "Severe" category.
 * **Top Severe Station:** *Fertilizer Township, Rourkela - OSPCB* (SPIS = **92.5**).
@@ -139,7 +151,9 @@ The **Station Pollution Intelligence Score (SPIS)** successfully groups stations
 ### 5.2 K-Means Clustering Profiles
 K-Means separated the cities into 4 distinct pollutant signature clusters:
 
-![Cities per Pollution-Signature Cluster](outputs/charts/pollution_clusters.png)
+<div align="center">
+  <img src="outputs/charts/pollution_clusters.png" width="520" alt="Cities per Pollution-Signature Cluster" />
+</div>
 
 ### 5.3 Machine Learning Performance
 We trained a **Random Forest Classifier** to predict the SPIS risk band of a station. It achieved a test validation accuracy of **97%**.
@@ -154,7 +168,9 @@ We trained a **Random Forest Classifier** to predict the SPIS risk band of a sta
 
 The feature importances check validates that average concentration and volatility are the primary classification drivers:
 
-![Model Feature Importances Chart](outputs/charts/risk_band_feature_importance.png)
+<div align="center">
+  <img src="outputs/charts/risk_band_feature_importance.png" width="450" alt="Model Feature Importances Chart" />
+</div>
 
 ### 5.4 Limitations and Failure Cases
 1. **Static Snapshots:** The Kaggle dataset represents a short-term snapshot. Long-term forecasting requires continuous database historical logging.
