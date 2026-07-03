@@ -1,9 +1,9 @@
 # =====================================================================
-# AQI India — Station-Level Pollution Intelligence Pipeline
-# =====================================================================
-# Purpose: Schema validation → cleaning → feature engineering 
+#  AQI India — Station-Level Pollution Intelligence Pipeline
+#  =====================================================================
+#  Purpose: Schema validation → cleaning → feature engineering 
 #          → geo-temporal analysis → anomaly flagging → SPIS index 
-#          → clustering → risk-band classifier → insights export.
+#           → clustering → risk-band classifier → insights export.
 # =====================================================================
 
 import os
@@ -73,9 +73,9 @@ def load_data(csv_path):
 def validate_schema(df, required=REQUIRED_COLS):
     missing = [c for c in required if c not in df.columns]
     if missing:
-        print("WARNING — missing expected columns:", missing)
+        print(" WARNING — missing expected columns:", missing)
     else:
-        print("Schema validation successful — all required columns present.")
+        print(" Schema validation successful — all required columns present.")
     print(f"Dataset Dimensions: Rows = {len(df):,} | Columns = {df.shape[1]}")
     return missing
 
