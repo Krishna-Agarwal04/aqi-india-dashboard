@@ -1,0 +1,11 @@
+AQI INDIA — POLLUTION INTELLIGENCE SUMMARY REPORT
+==================================================
+- Most polluted city (mean pollutant_avg): Mandi Gobindgarh (99.8)
+- Stations in 'Severe' SPIS band: 2 of 494 (0.4%)
+- Top severe station: Fertilizer Township, Rourkela - OSPCB in Rourkela (SPIS=92.5)
+- Distinct pollution-signature clusters identified: 4
+
+Method note: SPIS combines concentration, exceedance spread, anomaly rate 
+and reading persistence into one auditable score with rule-based bands, 
+distinguishing it from single-metric AQI reporting. Suitable as a basis for 
+a report / patent draft describing the scoring pipeline.

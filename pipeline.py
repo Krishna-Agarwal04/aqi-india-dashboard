@@ -1,0 +1,373 @@
+# =====================================================================
+# AQI India — Station-Level Pollution Intelligence Pipeline
+# =====================================================================
+# Purpose: Schema validation → cleaning → feature engineering 
+#          → geo-temporal analysis → anomaly flagging → SPIS index 
+#          → clustering → risk-band classifier → insights export.
+# =====================================================================
+
+import os
+import glob
+import shutil
+import zipfile
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report
+
+# ============================== CONFIG ==============================
+CONFIG = {
+    "DATASET_PATH": os.path.join("data", "aqi_india.csv"),
+    "OUTPUT_DIR": "outputs",
+    "KAGGLE_DATASET": "yashdogra/aqi-india",
+    "RANDOM_STATE": 42,
+    "IQR_MULTIPLIER": 1.5,                      # outlier sensitivity
+    "TOP_N": 15,                                # top-N rankings
+    "N_CLUSTERS": 4,                            # pollutant-signature clusters
+}
+
+# Create required directories
+os.makedirs(CONFIG["OUTPUT_DIR"], exist_ok=True)
+os.makedirs(os.path.join(CONFIG["OUTPUT_DIR"], "charts"), exist_ok=True)
+os.makedirs(os.path.join(CONFIG["OUTPUT_DIR"], "tables"), exist_ok=True)
+os.makedirs("data", exist_ok=True)
+
+print("Directories initialized. Outputs will be saved to:", CONFIG["OUTPUT_DIR"])
+
+# ============================== SETUP / FETCH DATA ==============================
+def fetch_dataset(path, kaggle_id):
+    """Ensure a usable CSV exists locally; download via kagglehub if path is missing."""
+    if not os.path.exists(path):
+        try:
+            import kagglehub
+            print("Local dataset not found — downloading via kagglehub...")
+            kdir = kagglehub.dataset_download(kaggle_id)
+            csvs = glob.glob(f"{kdir}/**/*.csv", recursive=True)
+            if csvs:
+                # Copy CSV to our local data/ directory
+                shutil.copy(csvs[0], path)
+                print(f"Downloaded and saved dataset to: {path}")
+                return path
+        except Exception as e:
+            raise FileNotFoundError(f"Dataset not found and download failed: {e}")
+    return path
+
+CSV_PATH = fetch_dataset(CONFIG["DATASET_PATH"], CONFIG["KAGGLE_DATASET"])
+print("Using dataset at:", CSV_PATH)
+
+# ============================== LOAD & VALIDATE ==============================
+REQUIRED_COLS = ["country", "state", "city", "station", "last_update",
+                  "latitude", "longitude", "pollutant_id",
+                  "pollutant_min", "pollutant_max", "pollutant_avg"]
+
+def load_data(csv_path):
+    df = pd.read_csv(csv_path)
+    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+    return df
+
+def validate_schema(df, required=REQUIRED_COLS):
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        print("WARNING — missing expected columns:", missing)
+    else:
+        print("Schema validation successful — all required columns present.")
+    print(f"Dataset Dimensions: Rows = {len(df):,} | Columns = {df.shape[1]}")
+    return missing
+
+df_raw = load_data(CSV_PATH)
+_ = validate_schema(df_raw)
+
+# ============================== CLEAN & PREPROCESS ==============================
+def standardize_columns(df):
+    df = df.copy()
+    for c in ["state", "city", "station", "pollutant_id"]:
+        if c in df.columns:
+            df[c] = df[c].astype(str).str.strip()
+    if "pollutant_id" in df.columns:
+        df["pollutant_id"] = df["pollutant_id"].str.upper().replace({
+            "PM2.5": "PM2.5", "PM 2.5": "PM2.5", "PM25": "PM2.5",
+            "PM10": "PM10", "PM 10": "PM10",
+            "NO2": "NO2", "SO2": "SO2", "OZONE": "OZONE", "O3": "OZONE",
+            "NH3": "NH3", "CO": "CO",
+        })
+    return df
+
+def clean_data(df):
+    """Type-fix, drop invalid coordinates/duplicates, handle missing values."""
+    df = df.copy()
+    num_cols = ["latitude", "longitude", "pollutant_min", "pollutant_max", "pollutant_avg"]
+    for c in num_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    if "last_update" in df.columns:
+        df["last_update"] = pd.to_datetime(df["last_update"], errors="coerce", dayfirst=True)
+
+    before = len(df)
+    df = df.dropna(subset=["pollutant_avg"])
+    df = df[(df["latitude"].between(6, 38)) & (df["longitude"].between(68, 98)) | df["latitude"].isna()]
+    df = df.drop_duplicates()
+    print(f"Data Cleaning: {before:,} -> {len(df):,} rows "
+          f"({before - len(df):,} invalid coordinates/missing average/duplicates removed)")
+
+    missing_report = df[num_cols].isna().mean().mul(100).round(2)
+    print("Missing-value percentage per column:\n", missing_report)
+    return df
+
+df1 = standardize_columns(df_raw)
+df_clean = clean_data(df1)
+df_clean.to_csv(os.path.join(CONFIG["OUTPUT_DIR"], "tables", "cleaned_dataset.csv"), index=False)
+
+# ============================== FEATURE ENGINEERING ==============================
+def engineer_features(df):
+    """Derive exceedance range, average-to-maximum ratio, and temporal parts."""
+    df = df.copy()
+    df["exceedance_range"] = df["pollutant_max"] - df["pollutant_min"]
+    df["avg_to_max_ratio"] = (df["pollutant_avg"] / df["pollutant_max"]).replace([np.inf, -np.inf], np.nan)
+    if "last_update" in df.columns:
+        df["hour"] = df["last_update"].dt.hour
+        df["date"] = df["last_update"].dt.date
+    return df
+
+df_feat = engineer_features(df_clean)
+
+# ============================== PLOTTING UTILITIES ==============================
+sns.set_style("whitegrid")
+CHART_DIR = os.path.join(CONFIG["OUTPUT_DIR"], "charts")
+
+def save_fig(fig, name):
+    path = os.path.join(CHART_DIR, f"{name}.png")
+    fig.savefig(path, bbox_inches="tight", dpi=130)
+    plt.close(fig)
+    print("Saved chart to:", path)
+
+def plot_bar(series, title, xlabel, name, top_n=15):
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    series.head(top_n).plot(kind="barh", ax=ax, color="#2b6cb0")
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.invert_yaxis()
+    save_fig(fig, name)
+
+def plot_box(df, x, y, title, name):
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    order = df.groupby(x)[y].median().sort_values(ascending=False).index
+    sns.boxplot(data=df, x=x, y=y, order=order, ax=ax, showfliers=False)
+    ax.set_title(title)
+    ax.tick_params(axis="x", rotation=60)
+    save_fig(fig, name)
+
+# Plot distributions
+pollutant_counts = df_feat["pollutant_id"].value_counts()
+plot_bar(pollutant_counts, "Readings per Pollutant", "Count", "pollutant_counts")
+plot_box(df_feat, "pollutant_id", "pollutant_avg",
+         "Pollutant Concentration Distribution", "pollutant_distribution")
+
+# ============================== GEO-SPATIAL HOTSPOT ANALYSIS ==============================
+def create_geospatial_views(df):
+    """City-level mean severity + a lat/lon scatter colored by concentration."""
+    geo = (df.dropna(subset=["latitude", "longitude"])
+             .groupby(["city", "latitude", "longitude"], as_index=False)["pollutant_avg"].mean())
+    fig, ax = plt.subplots(figsize=(7, 7))
+    sc = ax.scatter(geo["longitude"], geo["latitude"], c=geo["pollutant_avg"],
+                     cmap="Reds", s=60, edgecolor="k", linewidth=0.3)
+    plt.colorbar(sc, ax=ax, label="Mean pollutant_avg")
+    ax.set_title("Geo-spatial Pollution Hotspots")
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    save_fig(fig, "geo_hotspots")
+    return geo
+
+geo_view = create_geospatial_views(df_feat)
+
+# ============================== TEMP TREND ANALYSIS ==============================
+def pollutant_trend(df):
+    """Hourly mean concentration by pollutant."""
+    if "hour" not in df.columns or df["hour"].isna().all():
+        print("No usable hourly timestamp data for trend analysis — skipping.")
+        return None
+    trend = df.dropna(subset=["hour"]).groupby(["pollutant_id", "hour"])["pollutant_avg"].mean().reset_index()
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    for pid, sub in trend.groupby("pollutant_id"):
+        ax.plot(sub["hour"], sub["pollutant_avg"], marker="o", label=pid, linewidth=1.2)
+    ax.set_title("Hourly Pollutant Trend")
+    ax.set_xlabel("Hour")
+    ax.set_ylabel("Mean pollutant_avg")
+    ax.legend(fontsize=7, ncol=3)
+    save_fig(fig, "hourly_trend")
+    return trend
+
+trend_df = pollutant_trend(df_feat)
+
+# ============================== STATIONS & CITIES RANKING ==============================
+def summarize_city_level(df):
+    s = (df.groupby("city")
+           .agg(mean_avg=("pollutant_avg", "mean"),
+                max_avg=("pollutant_avg", "max"),
+                n_readings=("pollutant_avg", "count"))
+           .sort_values("mean_avg", ascending=False))
+    return s
+
+def summarize_station_level(df):
+    s = (df.groupby(["state", "city", "station"])
+           .agg(mean_avg=("pollutant_avg", "mean"),
+                max_avg=("pollutant_avg", "max"),
+                n_readings=("pollutant_avg", "count"))
+           .sort_values("mean_avg", ascending=False))
+    return s
+
+city_summary = summarize_city_level(df_feat)
+station_summary = summarize_station_level(df_feat)
+
+plot_bar(city_summary["mean_avg"], "Top Cities by Mean Pollutant Level", "Mean pollutant_avg",
+          "top_cities", top_n=CONFIG["TOP_N"])
+
+city_summary.to_csv(os.path.join(CONFIG["OUTPUT_DIR"], "tables", "city_summary.csv"))
+station_summary.to_csv(os.path.join(CONFIG["OUTPUT_DIR"], "tables", "station_summary.csv"))
+
+# ============================== ANOMALY / OUTLIER DETECTION ==============================
+def detect_anomalies(df, col="pollutant_avg", k=None):
+    """Flag rows outside [Q1 - k*IQR, Q3 + k*IQR] per pollutant type."""
+    k = k or CONFIG["IQR_MULTIPLIER"]
+    flagged = df.copy()
+    q1 = flagged.groupby("pollutant_id")[col].transform(lambda s: s.quantile(0.25))
+    q3 = flagged.groupby("pollutant_id")[col].transform(lambda s: s.quantile(0.75))
+    iqr = q3 - q1
+    lo, hi = q1 - k * iqr, q3 + k * iqr
+    flagged["is_anomaly"] = ~flagged[col].between(lo, hi)
+    print(f"Anomalies flagged: {flagged['is_anomaly'].sum():,} / {len(flagged):,} "
+          f"({flagged['is_anomaly'].mean()*100:.1f}%)")
+    return flagged
+
+df_anom = detect_anomalies(df_feat)
+df_anom[df_anom["is_anomaly"]].to_csv(
+    os.path.join(CONFIG["OUTPUT_DIR"], "tables", "anomalies.csv"), index=False
+)
+
+# ============================== STATION SCORING (SPIS) ==============================
+def _minmax(s):
+    return (s - s.min()) / (s.max() - s.min() + 1e-9)
+
+def compute_risk_score(df_anom_flagged):
+    """Composite Station Pollution Intelligence Score (0-100) + risk bands."""
+    g = (df_anom_flagged.groupby(["state", "city", "station"])
+           .agg(mean_avg=("pollutant_avg", "mean"),
+                mean_spread=("exceedance_range", "mean"),
+                anomaly_rate=("is_anomaly", "mean"),
+                n_readings=("pollutant_avg", "count"))
+           .reset_index())
+    g["persistence"] = np.log1p(g["n_readings"])
+
+    g["spis"] = (0.4 * _minmax(g["mean_avg"]) +
+                 0.25 * _minmax(g["mean_spread"]) +
+                 0.2 * _minmax(g["anomaly_rate"]) +
+                 0.15 * _minmax(g["persistence"])) * 100
+
+    def band(score):
+        if score >= 75: return "Severe"
+        if score >= 50: return "High"
+        if score >= 25: return "Moderate"
+        return "Low"
+    g["risk_band"] = g["spis"].apply(band)
+    return g.sort_values("spis", ascending=False)
+
+risk_scores = compute_risk_score(df_anom)
+risk_scores.to_csv(os.path.join(CONFIG["OUTPUT_DIR"], "tables", "spis_risk_scores.csv"), index=False)
+
+# Bar chart of risk bands
+fig, ax = plt.subplots(figsize=(6, 4))
+risk_scores["risk_band"].value_counts().reindex(["Low", "Moderate", "High", "Severe"]).plot(
+    kind="bar", ax=ax, color=["#38a169", "#d69e2e", "#dd6b20", "#c53030"]
+)
+ax.set_title("Stations by SPIS Risk Band")
+ax.set_ylabel("Station count")
+save_fig(fig, "spis_risk_bands")
+
+# ============================== POLLUTANT-SIGNATURE CLUSTERING ==============================
+def cluster_pollution_profiles(df, n_clusters=None):
+    """Cluster cities by their per-pollutant mean concentration profile."""
+    n_clusters = n_clusters or CONFIG["N_CLUSTERS"]
+    profile = df.pivot_table(index="city", columns="pollutant_id",
+                              values="pollutant_avg", aggfunc="mean").fillna(0)
+    X = StandardScaler().fit_transform(profile)
+    km = KMeans(n_clusters=n_clusters, random_state=CONFIG["RANDOM_STATE"], n_init=10)
+    profile["cluster"] = km.fit_predict(X)
+    return profile.sort_values("cluster")
+
+profiles = cluster_pollution_profiles(df_feat)
+profiles.to_csv(os.path.join(CONFIG["OUTPUT_DIR"], "tables", "city_pollution_clusters.csv"))
+
+fig, ax = plt.subplots(figsize=(7, 4.5))
+sns.countplot(x=profiles["cluster"], ax=ax, palette="Set2")
+ax.set_title("Cities per Pollution-Signature Cluster")
+save_fig(fig, "pollution_clusters")
+
+# ============================== RISK-BAND ML CLASSIFIER ==============================
+def train_risk_classifier(risk_df):
+    """Predict risk band to check index feature driver importances."""
+    feats = ["mean_avg", "mean_spread", "anomaly_rate", "persistence"]
+    X, y = risk_df[feats], risk_df["risk_band"]
+    if y.nunique() < 2 or len(risk_df) < 20:
+        print("Not enough station-level data for classifier training — skipping.")
+        return None
+    
+    X_tr, X_te, y_tr, y_te = train_test_split(
+        X, y, test_size=0.25, random_state=CONFIG["RANDOM_STATE"], stratify=y
+    )
+    clf = RandomForestClassifier(n_estimators=200, random_state=CONFIG["RANDOM_STATE"])
+    clf.fit(X_tr, y_tr)
+    
+    print("\nClassification Report (Validation):")
+    print(classification_report(y_te, clf.predict(X_te)))
+
+    importance = pd.Series(clf.feature_importances_, index=feats).sort_values(ascending=False)
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    importance.plot(kind="barh", ax=ax, color="#553c9a")
+    ax.invert_yaxis()
+    ax.set_title("Risk-Band Driver Importance")
+    save_fig(fig, "risk_band_feature_importance")
+    return clf
+
+risk_clf = train_risk_classifier(risk_scores)
+
+# ============================== GENERATE REPORT ==============================
+def generate_insights(city_summary, risk_scores, profiles):
+    lines = []
+    lines.append("AQI INDIA — POLLUTION INTELLIGENCE SUMMARY REPORT")
+    lines.append("=" * 50)
+    top_city = city_summary.index[0]
+    lines.append(f"- Most polluted city (mean pollutant_avg): {top_city} "
+                 f"({city_summary.iloc[0]['mean_avg']:.1f})")
+    
+    severe = risk_scores[risk_scores['risk_band'] == 'Severe']
+    lines.append(f"- Stations in 'Severe' SPIS band: {len(severe)} of {len(risk_scores)} "
+                 f"({len(severe)/len(risk_scores)*100:.1f}%)")
+    if len(severe):
+        lines.append(f"- Top severe station: {severe.iloc[0]['station']} in "
+                     f"{severe.iloc[0]['city']} (SPIS={severe.iloc[0]['spis']:.1f})")
+    
+    lines.append(f"- Distinct pollution-signature clusters identified: {profiles['cluster'].nunique()}")
+    lines.append("")
+    lines.append("Method note: SPIS combines concentration, exceedance spread, anomaly rate ")
+    lines.append("and reading persistence into one auditable score with rule-based bands, ")
+    lines.append("distinguishing it from single-metric AQI reporting. Suitable as a basis for ")
+    lines.append("a report / patent draft describing the scoring pipeline.")
+    
+    text = "\n".join(lines)
+    report_path = os.path.join(CONFIG["OUTPUT_DIR"], "insights_summary.txt")
+    with open(report_path, "w") as f:
+        f.write(text)
+    
+    print("\n" + text)
+    print(f"\nReport written to: {report_path}")
+    return text
+
+_ = generate_insights(city_summary, risk_scores, profiles)
+
+print("\n=====================================================================")
+print("Pipeline Run Completed Successfully. All outputs saved to:", CONFIG["OUTPUT_DIR"])
+print("=====================================================================")
